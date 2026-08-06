@@ -1422,14 +1422,25 @@ html[data-theme="dark"] .bell-item.err{background:#3A1E1A}
   var RATE_URL="https://script.google.com/macros/s/AKfycbyXgUI6xujauslsRXXhIgLLYIngAI_lmVzhvCE2phBkV6vp2HnPMPv0vn2dkYgI9Z4/exec";
   function rateEndpoint(){return state.rateUrl||RATE_URL;}
   var _jpN=0;
-  function jsonp(url,cb){
+  function jsonpOnce(url,cb,timeoutMs){
     var name="__jp"+(_jpN++),s=document.createElement("script"),done=false;
     function cleanup(){try{delete window[name];}catch(e){window[name]=undefined;}if(s.parentNode)s.parentNode.removeChild(s);}
     window[name]=function(data){if(done)return;done=true;cb(data);cleanup();};
     s.onerror=function(){if(done)return;done=true;cb(null);cleanup();};
     s.src=url+(url.indexOf("?")<0?"?":"&")+"callback="+name+"&_t="+Date.now();
     document.body.appendChild(s);
-    setTimeout(function(){if(done)return;done=true;cb(null);cleanup();},12000);
+    setTimeout(function(){if(done)return;done=true;cb(null);cleanup();},timeoutMs||7000);
+  }
+  // jsonp with automatic retries on transient failure (better mobile stability)
+  function jsonp(url,cb,tries){
+    var max=(typeof tries==="number")?tries:3, attempt=0;
+    (function go(){
+      attempt++;
+      jsonpOnce(url,function(d){
+        if(d!==null||attempt>=max){cb(d);return;}
+        setTimeout(go, 400*attempt); // backoff: 0.4s, 0.8s
+      },7000);
+    })();
   }
   function jget(k){try{return JSON.parse(localStorage.getItem(k)||"{}");}catch(e){return {};}}
   function jset(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
@@ -1462,14 +1473,25 @@ html[data-theme="dark"] .bell-item.err{background:#3A1E1A}
     var avgs={};CRITS.forEach(function(c){avgs[c[0]]=cnts[c[0]]?sums[c[0]]/cnts[c[0]]:0;});
     return {count:n,avg:avgs.overall,avgs:avgs,dist:dist,comments:list};
   }
+  var _revCache={}; // key -> {comments, rated, ts}
   function loadReviews(code,prof,cb){
+    var ck=code+"||"+prof;
+    var cached=_revCache[ck];
+    var served=false;
+    // serve cached instantly (feels stable), then refresh in background
+    if(cached){served=true;storeState="online";cb(cached.comments||[], !!cached.rated);}
     jsonp(rateEndpoint()+"?course="+encodeURIComponent(code)+"&prof="+encodeURIComponent(prof)+"&did="+encodeURIComponent(deviceId()),function(d){
       if(d&&typeof d.count!=="undefined"){
         storeState="online";
         if(d.rated){ var rs=ratedSet(); if(!rs["prof:"+prof]){ rs["prof:"+prof]=Date.now(); jset("jadwalisu_rated",rs); } }
+        _revCache[ck]={comments:d.comments||[],rated:!!d.rated,ts:Date.now()};
         cb(d.comments||[], !!d.rated);
       }
-      else{storeState="offline";cb(null,false);}
+      else{
+        // network hiccup: if we already showed cached data, keep it (stay online); else go offline
+        if(served){storeState="online";}
+        else{storeState="offline";cb(null,false);}
+      }
     });
   }
   function deviceId(){
@@ -1500,7 +1522,7 @@ html[data-theme="dark"] .bell-item.err{background:#3A1E1A}
 
   var rCourse="",rProf="",rSearch="",rVals={overall:0,clarity:0,organization:0,interaction:0,support:0,exams:0};
   function storeChip(){var cls=storeState==="online"?"on":(storeState==="offline"?"off":"chk");var lbl=storeState==="online"?t("storeOnline"):(storeState==="offline"?t("storeOffline"):t("storeChecking"));return '<span class="store-chip '+cls+'"><span class="d">\u25cf</span>'+esc(lbl)+'</span>';}
-  function pingStore(cb){jsonp(rateEndpoint()+"?course=__ping__&prof=__ping__",function(d){storeState=(d&&typeof d.count!=="undefined")?"online":"offline";var el=$("storeChipEl");if(el)el.innerHTML=storeChip();if(cb)cb();});}
+  function pingStore(cb){jsonp(rateEndpoint()+"?course=__ping__&prof=__ping__",function(d){if(d&&typeof d.count!=="undefined"){storeState="online";}else if(storeState!=="online"){storeState="offline";}var el=$("storeChipEl");if(el)el.innerHTML=storeChip();if(cb)cb();},3);}
 
   function renderRate(){
     var host=$("rateHost");if(!host)return;
